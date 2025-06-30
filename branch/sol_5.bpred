@@ -1,0 +1,143 @@
+#include "ooo_cpu.h"
+#include <vector>
+
+// Tournament Predictor with Global and Local Components
+class TOURNAMENT_PREDICTOR {
+  private:
+    // Local predictor components
+    const unsigned int LOCAL_PREDICTOR_SIZE = 2048;
+    const unsigned int LOCAL_HISTORY_TABLE_SIZE = 1024;
+    const unsigned int LOCAL_HISTORY_LENGTH = 10;
+    std::vector<unsigned int> local_history_table;
+    std::vector<unsigned int> local_predictor_table;
+    
+    // Global predictor components
+    const unsigned int GLOBAL_PREDICTOR_SIZE = 4096;
+    const unsigned int GLOBAL_HISTORY_LENGTH = 12;
+    unsigned int global_history;
+    std::vector<unsigned int> global_predictor_table;
+    
+    // Selector table
+    const unsigned int SELECTOR_TABLE_SIZE = 4096;
+    std::vector<unsigned int> selector_table;  // 2-bit saturating counter: 
+                                              // 0-1: choose local, 2-3: choose global
+    
+    // Utility functions
+    unsigned int get_local_index(uint64_t ip) {
+        return ip % LOCAL_HISTORY_TABLE_SIZE;
+    }
+    
+    unsigned int get_local_predictor_index(unsigned int local_history) {
+        return local_history % LOCAL_PREDICTOR_SIZE;
+    }
+    
+    unsigned int get_global_predictor_index() {
+        return global_history % GLOBAL_PREDICTOR_SIZE;
+    }
+    
+    unsigned int get_selector_index() {
+        return global_history % SELECTOR_TABLE_SIZE;
+    }
+    
+  public:
+    TOURNAMENT_PREDICTOR() {
+        // Initialize tables
+        local_history_table.resize(LOCAL_HISTORY_TABLE_SIZE, 0);
+        local_predictor_table.resize(LOCAL_PREDICTOR_SIZE, 2);  // Initialize counters to weakly taken (2)
+        global_predictor_table.resize(GLOBAL_PREDICTOR_SIZE, 2);  // Initialize counters to weakly taken (2)
+        selector_table.resize(SELECTOR_TABLE_SIZE, 2);  // Initialize selector to no preference
+        global_history = 0;
+    }
+    
+    // Make a prediction based on tournament selection
+    bool predict(uint64_t ip) {
+        unsigned int local_history_idx = get_local_index(ip);
+        unsigned int local_history = local_history_table[local_history_idx];
+        unsigned int local_predictor_idx = get_local_predictor_index(local_history);
+        unsigned int global_predictor_idx = get_global_predictor_index();
+        unsigned int selector_idx = get_selector_index();
+        
+        // Get predictions from both predictors (0-1: not taken, 2-3: taken)
+        bool local_prediction = local_predictor_table[local_predictor_idx] >= 2;
+        bool global_prediction = global_predictor_table[global_predictor_idx] >= 2;
+        
+        // Use selector to choose between predictors
+        if (selector_table[selector_idx] < 2)
+            return local_prediction;  // Use local predictor
+        else
+            return global_prediction;  // Use global predictor
+    }
+    
+    // Update the predictor with actual branch outcome
+    void update(uint64_t ip, bool taken, bool predicted_taken) {
+        unsigned int local_history_idx = get_local_index(ip);
+        unsigned int local_history = local_history_table[local_history_idx];
+        unsigned int local_predictor_idx = get_local_predictor_index(local_history);
+        unsigned int global_predictor_idx = get_global_predictor_index();
+        unsigned int selector_idx = get_selector_index();
+        
+        // Get predictions from both predictors
+        bool local_prediction = local_predictor_table[local_predictor_idx] >= 2;
+        bool global_prediction = global_predictor_table[global_predictor_idx] >= 2;
+        
+        // Update selector - key metric: which predictor was correct
+        if (local_prediction != global_prediction) {
+            // Only update selector when predictors disagree
+            if (local_prediction == taken) {
+                // Local was correct, global was wrong - favor local
+                if (selector_table[selector_idx] > 0)
+                    selector_table[selector_idx]--;
+            } else if (global_prediction == taken) {
+                // Global was correct, local was wrong - favor global
+                if (selector_table[selector_idx] < 3)
+                    selector_table[selector_idx]++;
+            }
+        }
+        
+        // Update local predictor counter
+        if (taken) {
+            if (local_predictor_table[local_predictor_idx] < 3)
+                local_predictor_table[local_predictor_idx]++;
+        } else {
+            if (local_predictor_table[local_predictor_idx] > 0)
+                local_predictor_table[local_predictor_idx]--;
+        }
+        
+        // Update global predictor counter
+        if (taken) {
+            if (global_predictor_table[global_predictor_idx] < 3)
+                global_predictor_table[global_predictor_idx]++;
+        } else {
+            if (global_predictor_table[global_predictor_idx] > 0)
+                global_predictor_table[global_predictor_idx]--;
+        }
+        
+        // Update history registers
+        local_history_table[local_history_idx] = ((local_history << 1) | taken) & 
+                                                ((1 << LOCAL_HISTORY_LENGTH) - 1);
+        global_history = ((global_history << 1) | taken) & 
+                         ((1 << GLOBAL_HISTORY_LENGTH) - 1);
+    }
+};
+
+// Global instance of our predictor
+TOURNAMENT_PREDICTOR tournament_predictor;
+
+// ChampSim integration functions
+void O3_CPU::initialize_branch_predictor()
+{
+    // Tournament predictor is initialized through its constructor
+    // Any additional initialization can go here
+    cout << "CPU " << cpu << " Tournament Branch Predictor Initialized" << endl;
+}
+
+uint8_t O3_CPU::predict_branch(uint64_t ip)
+{
+    return tournament_predictor.predict(ip);
+}
+
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
+{
+    tournament_predictor.update(ip, taken, predict_branch(ip));
+}
+

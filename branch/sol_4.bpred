@@ -1,0 +1,124 @@
+// tournament.bpred
+
+#include "ooo_cpu.h"
+#include <iostream>
+
+#define LOCAL_HISTORY_TABLE_SIZE 1024
+#define LOCAL_PREDICTOR_SIZE 1024
+#define GLOBAL_HISTORY_LENGTH 6
+#define GLOBAL_PREDICTOR_SIZE 64
+#define SELECTOR_SIZE 1024
+
+#define SAT_INC(x, max) if (x < max) x++
+#define SAT_DEC(x) if (x > 0) x--
+
+using namespace std;
+
+// Predictor tables
+uint16_t local_history_table[NUM_CPUS][LOCAL_HISTORY_TABLE_SIZE];     // per-PC local history
+uint8_t  local_predictor[NUM_CPUS][LOCAL_PREDICTOR_SIZE];             // per-local-history counter
+uint8_t  global_predictor[NUM_CPUS][GLOBAL_PREDICTOR_SIZE];           // per-global-history counter
+uint8_t  selector_table[NUM_CPUS][SELECTOR_SIZE];                     // chooser: prefers local or global
+
+uint8_t  last_local_pred[NUM_CPUS];
+uint8_t  last_global_pred[NUM_CPUS];
+uint8_t  last_selector_choice[NUM_CPUS];
+uint64_t global_history[NUM_CPUS];
+
+// Helper functions
+uint32_t get_local_index(uint64_t ip) {
+    return ip % LOCAL_HISTORY_TABLE_SIZE;
+}
+
+uint32_t get_local_pred_index(uint16_t history) {
+    return history % LOCAL_PREDICTOR_SIZE;
+}
+
+uint32_t get_global_index(uint64_t history) {
+    return history % GLOBAL_PREDICTOR_SIZE;
+}
+
+uint32_t get_selector_index(uint64_t ip) {
+    return ip % SELECTOR_SIZE;
+}
+
+void O3_CPU::initialize_branch_predictor() {
+    cout << "CPU " << cpu << " Tournament Predictor initialized (C++ ChampSim version)" << endl;
+
+    for (int i = 0; i < LOCAL_HISTORY_TABLE_SIZE; i++)
+        local_history_table[cpu][i] = 0;
+
+    for (int i = 0; i < LOCAL_PREDICTOR_SIZE; i++)
+        local_predictor[cpu][i] = 2;  // weakly taken
+
+    for (int i = 0; i < GLOBAL_PREDICTOR_SIZE; i++)
+        global_predictor[cpu][i] = 2;  // weakly taken
+
+    for (int i = 0; i < SELECTOR_SIZE; i++)
+        selector_table[cpu][i] = 1;  // weakly prefer global
+
+    global_history[cpu] = 0;
+}
+
+// Prediction function
+uint8_t O3_CPU::predict_branch(uint64_t ip) {
+    uint32_t local_idx = get_local_index(ip);
+    uint16_t local_hist = local_history_table[cpu][local_idx];
+    uint32_t local_pred_idx = get_local_pred_index(local_hist);
+    uint32_t global_idx = get_global_index(global_history[cpu]);
+    uint32_t selector_idx = get_selector_index(ip);
+
+    uint8_t local_pred = (local_predictor[cpu][local_pred_idx] >= 2);
+    uint8_t global_pred = (global_predictor[cpu][global_idx] >= 2);
+
+    // Choose based on selector
+    uint8_t use_local = (selector_table[cpu][selector_idx] >= 2);
+    uint8_t final_pred = use_local ? local_pred : global_pred;
+
+    last_local_pred[cpu] = local_pred;
+    last_global_pred[cpu] = global_pred;
+    last_selector_choice[cpu] = use_local;
+
+    return final_pred;
+}
+
+// Update function
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken) {
+    uint32_t local_idx = get_local_index(ip);
+    uint16_t local_hist = local_history_table[cpu][local_idx];
+    uint32_t local_pred_idx = get_local_pred_index(local_hist);
+    uint32_t global_idx = get_global_index(global_history[cpu]);
+    uint32_t selector_idx = get_selector_index(ip);
+
+    // Update local predictor
+    if (taken)
+        SAT_INC(local_predictor[cpu][local_pred_idx], 3);
+    else
+        SAT_DEC(local_predictor[cpu][local_pred_idx]);
+
+    // Update global predictor
+    if (taken)
+        SAT_INC(global_predictor[cpu][global_idx], 3);
+    else
+        SAT_DEC(global_predictor[cpu][global_idx]);
+
+    // Update selector (if local and global disagree)
+    if (last_local_pred[cpu] != last_global_pred[cpu]) {
+        if (last_local_pred[cpu] == taken)
+            SAT_INC(selector_table[cpu][selector_idx], 3);
+        else if (last_global_pred[cpu] == taken)
+            SAT_DEC(selector_table[cpu][selector_idx]);
+    }
+
+    // Update local history
+    local_history_table[cpu][local_idx] <<= 1;
+    local_history_table[cpu][local_idx] |= taken;
+    local_history_table[cpu][local_idx] &= (LOCAL_PREDICTOR_SIZE - 1);  // mask for size
+
+    // Update global history
+    global_history[cpu] <<= 1;
+    global_history[cpu] |= taken;
+    global_history[cpu] &= ((1 << GLOBAL_HISTORY_LENGTH) - 1);
+}
+
+

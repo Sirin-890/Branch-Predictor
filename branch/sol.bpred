@@ -1,0 +1,118 @@
+// tournament.bpred
+
+#include "ooo_cpu.h"
+#include <iostream>
+
+#define GLOBAL_HISTORY_LENGTH 14
+#define GLOBAL_HISTORY_MASK ((1 << GLOBAL_HISTORY_LENGTH) - 1)
+#define GS_HISTORY_TABLE_SIZE 16384
+#define LOCAL_HISTORY_TABLE_SIZE 1024
+#define LOCAL_PREDICTOR_SIZE 1024
+#define CHOOSER_TABLE_SIZE 4096
+
+using namespace std;
+
+// Global history and tables
+int branch_history_vector[NUM_CPUS];
+int gs_history_table[NUM_CPUS][GS_HISTORY_TABLE_SIZE];
+uint16_t local_history_table[NUM_CPUS][LOCAL_HISTORY_TABLE_SIZE];
+uint8_t local_predictor[NUM_CPUS][LOCAL_PREDICTOR_SIZE];
+uint8_t chooser_table[NUM_CPUS][CHOOSER_TABLE_SIZE];
+
+// Last prediction info
+int last_global_pred[NUM_CPUS];
+int last_local_pred[NUM_CPUS];
+int last_choice[NUM_CPUS]; // 0 = GShare, 1 = Local
+
+// Hash functions
+unsigned int gs_table_hash(uint64_t ip, int bh_vector) {
+    return (ip ^ (ip >> GLOBAL_HISTORY_LENGTH) ^ bh_vector) % GS_HISTORY_TABLE_SIZE;
+}
+
+unsigned int local_history_index(uint64_t ip) {
+    return ip % LOCAL_HISTORY_TABLE_SIZE;
+}
+
+unsigned int local_predictor_index(uint16_t history) {
+    return history % LOCAL_PREDICTOR_SIZE;
+}
+
+unsigned int chooser_index(uint64_t ip) {
+    return ip % CHOOSER_TABLE_SIZE;
+}
+
+// Initialization
+void O3_CPU::initialize_branch_predictor() {
+    cout << "CPU " << cpu << " Tournament Predictor (GShare + Local)" << endl;
+
+    branch_history_vector[cpu] = 0;
+
+    for (int i = 0; i < GS_HISTORY_TABLE_SIZE; i++)
+        gs_history_table[cpu][i] = 2; // Weakly taken
+
+    for (int i = 0; i < LOCAL_HISTORY_TABLE_SIZE; i++)
+        local_history_table[cpu][i] = 0;
+
+    for (int i = 0; i < LOCAL_PREDICTOR_SIZE; i++)
+        local_predictor[cpu][i] = 2; // Weakly taken
+
+    for (int i = 0; i < CHOOSER_TABLE_SIZE; i++)
+        chooser_table[cpu][i] = 1; // Neutral
+}
+
+// Prediction
+uint8_t O3_CPU::predict_branch(uint64_t ip) {
+    unsigned int gs_index = gs_table_hash(ip, branch_history_vector[cpu]);
+    unsigned int chooser_idx = chooser_index(ip);
+    unsigned int local_idx = local_history_index(ip);
+    uint16_t local_hist = local_history_table[cpu][local_idx];
+    unsigned int local_pred_idx = local_predictor_index(local_hist);
+
+    int global_prediction = (gs_history_table[cpu][gs_index] >= 2) ? 1 : 0;
+    int local_prediction = (local_predictor[cpu][local_pred_idx] >= 2) ? 1 : 0;
+
+    int use_local = (chooser_table[cpu][chooser_idx] >= 2);
+    last_global_pred[cpu] = global_prediction;
+    last_local_pred[cpu] = local_prediction;
+    last_choice[cpu] = use_local;
+
+    return use_local ? local_prediction : global_prediction;
+}
+
+// Update after actual result
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken) {
+    unsigned int gs_index = gs_table_hash(ip, branch_history_vector[cpu]);
+    unsigned int chooser_idx = chooser_index(ip);
+    unsigned int local_idx = local_history_index(ip);
+    uint16_t local_hist = local_history_table[cpu][local_idx];
+    unsigned int local_pred_idx = local_predictor_index(local_hist);
+
+    // Update GShare
+    if (taken && gs_history_table[cpu][gs_index] < 3)
+        gs_history_table[cpu][gs_index]++;
+    else if (!taken && gs_history_table[cpu][gs_index] > 0)
+        gs_history_table[cpu][gs_index]--;
+
+    // Update Local
+    if (taken && local_predictor[cpu][local_pred_idx] < 3)
+        local_predictor[cpu][local_pred_idx]++;
+    else if (!taken && local_predictor[cpu][local_pred_idx] > 0)
+        local_predictor[cpu][local_pred_idx]--;
+
+    // Update chooser table
+    if (last_global_pred[cpu] != last_local_pred[cpu]) {
+        if (last_local_pred[cpu] == taken && chooser_table[cpu][chooser_idx] < 3)
+            chooser_table[cpu][chooser_idx]++;
+        else if (last_global_pred[cpu] == taken && chooser_table[cpu][chooser_idx] > 0)
+            chooser_table[cpu][chooser_idx]--;
+    }
+
+    // Update histories
+    branch_history_vector[cpu] <<= 1;
+    branch_history_vector[cpu] &= GLOBAL_HISTORY_MASK;
+    branch_history_vector[cpu] |= taken;
+
+    local_history_table[cpu][local_idx] <<= 1;
+    local_history_table[cpu][local_idx] |= taken;
+    local_history_table[cpu][local_idx] &= (LOCAL_PREDICTOR_SIZE - 1);
+}
