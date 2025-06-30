@@ -9,7 +9,7 @@ This repository contains our custom branch predictor implementations integrated 
 
 
 
-add Trace file and put it in dpc3_tracer
+Makea folder dpc3_tracer and  add Trace file in it
 
 ### 1. Replace Branch Predictor File
 
