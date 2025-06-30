@@ -9,7 +9,7 @@ This repository contains our custom branch predictor implementations integrated 
 
 
 
-> Replace the URL if you are cloning from a fork.
+add Trace file and put it in dpc3_tracer
 
 ### 1. Replace Branch Predictor File
 
